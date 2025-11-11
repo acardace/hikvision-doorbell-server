@@ -222,6 +222,17 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log ICE candidates for debugging
+	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			log.Printf("[WebRTC] Server ICE candidate: type=%s protocol=%s address=%s port=%d",
+				candidate.Typ.String(),
+				candidate.Protocol.String(),
+				candidate.Address,
+				candidate.Port)
+		}
+	})
+
 	// Wait for ICE gathering to complete
 	gatherComplete := make(chan struct{})
 	peerConnection.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
