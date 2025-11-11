@@ -136,12 +136,12 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 
 		// Start ffplay to play incoming audio
 		ffplayArgs := []string{
-			"-f", "mulaw",        // G.711 µ-law format
-			"-ar", "8000",        // Sample rate
-			"-ac", "1",           // Mono
-			"-nodisp",            // No video display
-			"-autoexit",          // Exit when done
-			"-",                  // Read from stdin
+			"-f", "mulaw", // G.711 µ-law format
+			"-sample_rate", "8000", // Sample rate
+			"-ch_layout", "mono", // Mono
+			"-nodisp",   // No video display
+			"-autoexit", // Exit when done
+			"-",         // Read from stdin
 		}
 
 		ffplayCmd = exec.Command("ffplay", ffplayArgs...)
@@ -192,12 +192,12 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 
 	// Start ffmpeg to capture microphone input
 	ffmpegArgs := []string{
-		"-f", "alsa",           // Linux audio input
-		"-i", inputDevice,      // Input device
-		"-ar", "8000",          // Sample rate: 8000 Hz
-		"-ac", "1",             // Channels: mono
-		"-f", "mulaw",          // Output format: G.711 µ-law
-		"-",                    // Output to stdout
+		"-f", "alsa", // Linux audio input
+		"-i", inputDevice, // Input device
+		"-sample_rate", "8000", // Sample rate: 8000 Hz
+		"-ch_layout", "mono", // Channels: mono
+		"-f", "mulaw", // Output format: G.711 µ-law
+		"-", // Output to stdout
 	}
 
 	log.Printf("Starting microphone capture (device: %s, format: G.711µ-law, 8000Hz, mono)", inputDevice)
