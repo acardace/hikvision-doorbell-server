@@ -109,17 +109,30 @@ func (l *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 // GetTwoWayAudioChannels retrieves available two-way audio channels
 func (c *Client) GetTwoWayAudioChannels() (*TwoWayAudioChannelList, error) {
+	return c.getTwoWayAudioChannels(true)
+}
+
+// GetTwoWayAudioChannelsQuiet retrieves available two-way audio channels without logging (for health checks)
+func (c *Client) GetTwoWayAudioChannelsQuiet() (*TwoWayAudioChannelList, error) {
+	return c.getTwoWayAudioChannels(false)
+}
+
+func (c *Client) getTwoWayAudioChannels(verbose bool) (*TwoWayAudioChannelList, error) {
 	url := fmt.Sprintf("http://%s/ISAPI/System/TwoWayAudio/channels", c.host)
 	resp, err := c.client.Get(url)
 	if err != nil {
-		log.Printf("[Hikvision] GetTwoWayAudioChannels: Request failed: %v", err)
+		if verbose {
+			log.Printf("[Hikvision] GetTwoWayAudioChannels: Request failed: %v", err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("[Hikvision] GetTwoWayAudioChannels: Error response body: %s", string(body))
+		if verbose {
+			log.Printf("[Hikvision] GetTwoWayAudioChannels: Error response body: %s", string(body))
+		}
 		return nil, fmt.Errorf("failed to get channels: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
@@ -130,14 +143,18 @@ func (c *Client) GetTwoWayAudioChannels() (*TwoWayAudioChannelList, error) {
 
 	var channels TwoWayAudioChannelList
 	if err := xml.Unmarshal(body, &channels); err != nil {
-		log.Printf("[Hikvision] GetTwoWayAudioChannels: Failed to parse XML: %v", err)
+		if verbose {
+			log.Printf("[Hikvision] GetTwoWayAudioChannels: Failed to parse XML: %v", err)
+		}
 		return nil, err
 	}
 
-	log.Printf("[Hikvision] GetTwoWayAudioChannels: Found %d channels", len(channels.Channels))
-	for i, ch := range channels.Channels {
-		log.Printf("[Hikvision] GetTwoWayAudioChannels: Channel %d - ID: %s, Enabled: %s, Codec: %s",
-			i, ch.ID, ch.Enabled, ch.AudioCompressionType)
+	if verbose {
+		log.Printf("[Hikvision] GetTwoWayAudioChannels: Found %d channels", len(channels.Channels))
+		for i, ch := range channels.Channels {
+			log.Printf("[Hikvision] GetTwoWayAudioChannels: Channel %d - ID: %s, Enabled: %s, Codec: %s",
+				i, ch.ID, ch.Enabled, ch.AudioCompressionType)
+		}
 	}
 
 	return &channels, nil

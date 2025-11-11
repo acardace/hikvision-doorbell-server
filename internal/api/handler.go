@@ -22,9 +22,10 @@ func NewHandler(hikClient *hikvision.Client) *Handler {
 
 // Healthz endpoint for Kubernetes health probes
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
-	// Test connection to doorbell by getting channels
-	_, err := h.hikClient.GetTwoWayAudioChannels()
+	// Test connection to doorbell by getting channels (quietly, without logging)
+	_, err := h.hikClient.GetTwoWayAudioChannelsQuiet()
 	if err != nil {
+		// Only log errors, not successful health checks
 		log.Printf("[Health] Device unreachable: %v", err)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("unhealthy"))
