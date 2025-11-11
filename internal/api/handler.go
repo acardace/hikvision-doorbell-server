@@ -44,18 +44,40 @@ func (h *Handler) CloseAllSessions() error {
 	return nil
 }
 
+// CORS middleware to allow requests from Home Assistant
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow all origins for local network deployment
+		// In production, you might want to restrict this to specific origins
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SetupRoutes configures all API routes
 func (h *Handler) SetupRoutes() *mux.Router {
 	router := mux.NewRouter()
+
+	// Apply CORS middleware
+	router.Use(corsMiddleware)
 
 	// Health check
 	router.HandleFunc("/healthz", h.Healthz).Methods("GET")
 
 	// WebRTC signaling
-	router.HandleFunc("/api/webrtc/offer", h.webrtcHandler.HandleOffer).Methods("POST")
+	router.HandleFunc("/api/webrtc/offer", h.webrtcHandler.HandleOffer).Methods("POST", "OPTIONS")
 
 	// Play audio file (with automatic session management)
-	router.HandleFunc("/api/audio/play-file", HandlePlayFile(h.hikClient)).Methods("POST")
+	router.HandleFunc("/api/audio/play-file", HandlePlayFile(h.hikClient)).Methods("POST", "OPTIONS")
 
 	return router
 }
