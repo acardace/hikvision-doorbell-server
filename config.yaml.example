@@ -1,0 +1,8 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+hikvision:
+  host: "192.168.1.100"  # Your Hikvision doorbell IP
+  username: "admin"
+  password: "your-password"
