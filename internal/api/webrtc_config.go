@@ -89,7 +89,30 @@ func (c *WebRTCConfig) CreateAPI() (*webrtc.API, error) {
 		settingEngine.SetNAT1To1IPs([]string{c.PublicIP}, webrtc.ICECandidateTypeHost)
 	}
 
-	return webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)), nil
+	// Create MediaEngine with only PCMU codec
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    "audio/PCMU",
+			ClockRate:   8000,
+			Channels:    1,
+			SDPFmtpLine: "",
+		},
+		PayloadType: 0,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		logger.Log.Error("failed to register PCMU codec",
+			slog.String("component", "webrtc_config"),
+			slog.String("error", err.Error()))
+		return nil, err
+	}
+
+	logger.Log.Info("configured WebRTC to use PCMU codec only",
+		slog.String("component", "webrtc_config"))
+
+	return webrtc.NewAPI(
+		webrtc.WithSettingEngine(settingEngine),
+		webrtc.WithMediaEngine(mediaEngine),
+	), nil
 }
 
 // CreatePeerConnection creates a new WebRTC peer connection with the configured API
