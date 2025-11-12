@@ -1,33 +1,37 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"strings"
 	"sync"
 
 	"github.com/acardace/hikvision-doorbell-server/internal/audio"
-	"github.com/acardace/hikvision-doorbell-server/internal/hikvision"
 	"github.com/acardace/hikvision-doorbell-server/internal/logger"
+	"github.com/acardace/hikvision-doorbell-server/internal/session"
+	"github.com/acardace/hikvision-doorbell-server/internal/streaming"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 type WebRTCHandler struct {
-	hikClient      *hikvision.Client
+	config         *WebRTCConfig
+	sessionManager session.SessionManager
+	audioStreamer  streaming.AudioStreamer
 	peerConnection *webrtc.PeerConnection
-	audioWriter    *hikvision.AudioStreamWriter
-	audioReader    *hikvision.AudioStreamReader
-	activeSession  *hikvision.AudioSession
+	activeSession  *session.AudioSession
 	mu             sync.Mutex
+	cancelFunc     context.CancelFunc // Cancel function for goroutines
 }
 
-func NewWebRTCHandler(hikClient *hikvision.Client) *WebRTCHandler {
+func NewWebRTCHandler(sessionManager session.SessionManager, audioStreamer streaming.AudioStreamer) *WebRTCHandler {
+	config := NewWebRTCConfig()
+	config.LoadFromEnv()
+
 	return &WebRTCHandler{
-		hikClient: hikClient,
+		config:         config,
+		sessionManager: sessionManager,
+		audioStreamer:  audioStreamer,
 	}
 }
 
@@ -35,6 +39,10 @@ func NewWebRTCHandler(hikClient *hikvision.Client) *WebRTCHandler {
 func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Create context for managing goroutines lifecycle
+	ctx, cancel := context.WithCancel(r.Context())
+	h.cancelFunc = cancel
 
 	// Parse SDP offer
 	var offer webrtc.SessionDescription
@@ -50,61 +58,9 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		slog.String("component", "webrtc"),
 		slog.String("type", offer.Type.String()))
 
-	// Create WebRTC configuration for local network only
-	// No ICE servers needed - this is meant for local/VPN use only
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{},
-	}
-
-	// Create a SettingEngine with fixed UDP ports
-	settingEngine := webrtc.SettingEngine{}
-	settingEngine.SetNetworkTypes([]webrtc.NetworkType{
-		webrtc.NetworkTypeUDP4,
-	})
-
-	// Use single fixed UDP port (single user)
-	if err := settingEngine.SetEphemeralUDPPortRange(50000, 50000); err != nil {
-		logger.Log.Error("failed to set UDP port range",
-			slog.String("component", "webrtc"),
-			slog.String("error", err.Error()))
-		http.Error(w, "Failed to configure WebRTC", http.StatusInternalServerError)
-		return
-	}
-
-	// Get public IP from environment variable or file for NAT traversal
-	publicIP := os.Getenv("WEBRTC_PUBLIC_IP")
-	if publicIP == "" {
-		// Try to read from file (set by init container)
-		if ipFile := os.Getenv("WEBRTC_PUBLIC_IP_FILE"); ipFile != "" {
-			if data, err := os.ReadFile(ipFile); err == nil {
-				publicIP = string(data)
-				publicIP = strings.TrimSpace(publicIP)
-			} else {
-				logger.Log.Warn("could not read public IP from file",
-					slog.String("component", "webrtc"),
-					slog.String("file", ipFile),
-					slog.String("error", err.Error()))
-			}
-		}
-	}
-	if publicIP != "" {
-		logger.Log.Info("using public IP for ICE candidates",
-			slog.String("component", "webrtc"),
-			slog.String("ip", publicIP))
-		settingEngine.SetNAT1To1IPs([]string{publicIP}, webrtc.ICECandidateTypeHost)
-	} else {
-		logger.Log.Warn("no public IP configured, ICE candidates may not work over NAT/VPN",
-			slog.String("component", "webrtc"))
-	}
-
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
-
-	// Create new peer connection using the custom API
-	peerConnection, err := api.NewPeerConnection(config)
+	// Create peer connection using configuration
+	peerConnection, err := h.config.CreatePeerConnection()
 	if err != nil {
-		logger.Log.Error("failed to create peer connection",
-			slog.String("component", "webrtc"),
-			slog.String("error", err.Error()))
 		http.Error(w, "Failed to create peer connection", http.StatusInternalServerError)
 		return
 	}
@@ -135,7 +91,7 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle incoming audio track (from browser/client to doorbell)
+	// Handle incoming audio track (from browser/client to device)
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		logger.Log.Info("received remote track",
 			slog.String("component", "webrtc"),
@@ -144,118 +100,49 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 
 		// Start session if not already active
 		if h.activeSession == nil {
-			logger.Log.Info("starting audio session", slog.String("component", "webrtc"))
+			logger.Log.Info("acquiring audio session", slog.String("component", "webrtc"))
 
-			// Get available channels
-			channels, err := h.hikClient.GetTwoWayAudioChannels()
+			// Acquire session using session manager
+			sess, err := h.sessionManager.AcquireChannel(ctx)
 			if err != nil {
-				logger.Log.Error("failed to get audio channels",
+				logger.Log.Error("failed to acquire audio session",
+					slog.String("component", "webrtc"),
+					slog.String("error", err.Error()))
+				return
+			}
+			h.activeSession = sess
+
+			// Start audio streaming
+			if err := h.audioStreamer.Start(ctx, sess); err != nil {
+				logger.Log.Error("failed to start audio streaming",
 					slog.String("component", "webrtc"),
 					slog.String("error", err.Error()))
 				return
 			}
 
-			if len(channels.Channels) == 0 {
-				logger.Log.Warn("no audio channels available", slog.String("component", "webrtc"))
-				return
-			}
-
-			// Find first available channel
-			var channelID string
-			for _, ch := range channels.Channels {
-				if ch.Enabled == "false" {
-					channelID = ch.ID
-					break
+			// Start goroutine to stream device audio to client
+			go func() {
+				if err := h.audioStreamer.StreamDeviceToClient(ctx, audioTrack); err != nil {
+					logger.Log.Error("device-to-client streaming error",
+						slog.String("component", "webrtc"),
+						slog.String("error", err.Error()))
 				}
-			}
-
-			if channelID == "" {
-				logger.Log.Warn("no available channels, all in use",
-					slog.String("component", "webrtc"))
-				return
-			}
-
-			session, err := h.hikClient.OpenAudioChannel(channelID)
-			if err != nil {
-				logger.Log.Error("failed to open audio channel",
-					slog.String("component", "webrtc"),
-					slog.String("channel_id", channelID),
-					slog.String("error", err.Error()))
-				return
-			}
-			h.activeSession = session
-
-			// Create audio writer (for sending to doorbell)
-			h.audioWriter = h.hikClient.NewAudioStreamWriter(session)
-			h.audioWriter.Start()
-
-			// Create audio reader (for receiving from doorbell)
-			h.audioReader = h.hikClient.NewAudioStreamReader(session)
-			h.audioReader.Start()
-
-			// Start goroutine to read from doorbell and send via WebRTC
-			// Pass audioReader as parameter to avoid race condition with cleanup()
-			go func(reader *hikvision.AudioStreamReader, track *webrtc.TrackLocalStaticSample) {
-				defer logger.Log.Info("stopped reading audio from doorbell", slog.String("component", "webrtc"))
-
-				// Use io.ReadFull to read exactly audio.SampleSize bytes at a time
-				buffer := make([]byte, audio.SampleSize)
-
-				for {
-					// Read exactly audio.SampleSize bytes
-					n, err := io.ReadFull(reader, buffer)
-					if err != nil {
-						if err != io.EOF && err != io.ErrUnexpectedEOF {
-							logger.Log.Error("error reading from doorbell",
-								slog.String("component", "webrtc"),
-								slog.String("error", err.Error()))
-						}
-						return
-					}
-
-					// Send to WebRTC track with precise timing
-					if err := track.WriteSample(media.Sample{
-						Data:     buffer[:n],
-						Duration: audio.SampleDuration,
-					}); err != nil {
-						logger.Log.Error("error sending audio sample to client",
-							slog.String("component", "webrtc"),
-							slog.String("error", err.Error()))
-						return
-					}
-				}
-			}(h.audioReader, audioTrack)
+			}()
 		}
 
-		// Read RTP packets and send to doorbell
-		// Pass audioWriter as parameter to avoid race condition with cleanup()
-		go func(writer *hikvision.AudioStreamWriter, remoteTrack *webrtc.TrackRemote) {
+		// Start goroutine to stream client audio to device
+		go func() {
 			defer func() {
 				logger.Log.Info("track ended, cleaning up session", slog.String("component", "webrtc"))
 				h.cleanup()
 			}()
 
-			for {
-				rtp, _, err := remoteTrack.ReadRTP()
-				if err != nil {
-					if err != io.EOF {
-						logger.Log.Error("error reading RTP packet",
-							slog.String("component", "webrtc"),
-							slog.String("error", err.Error()))
-					}
-					return
-				}
-
-				// Send audio payload to doorbell
-				_, err = writer.Write(rtp.Payload)
-				if err != nil {
-					logger.Log.Error("error writing audio to doorbell",
-						slog.String("component", "webrtc"),
-						slog.String("error", err.Error()))
-					return
-				}
+			if err := h.audioStreamer.StreamClientToDevice(ctx, track); err != nil {
+				logger.Log.Error("client-to-device streaming error",
+					slog.String("component", "webrtc"),
+					slog.String("error", err.Error()))
 			}
-		}(h.audioWriter, track)
+		}()
 	})
 
 	// Handle connection state changes
@@ -337,21 +224,30 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 
 // cleanup closes the session and cleans up resources
 func (h *WebRTCHandler) cleanup() {
-	if h.audioWriter != nil {
-		h.audioWriter.Close()
-		h.audioWriter = nil
+	// Cancel all goroutines first
+	if h.cancelFunc != nil {
+		h.cancelFunc()
+		h.cancelFunc = nil
 	}
 
-	if h.audioReader != nil {
-		h.audioReader.Close()
-		h.audioReader = nil
+	// Stop audio streaming
+	if h.audioStreamer != nil {
+		h.audioStreamer.Stop()
 	}
 
+	// Release audio session
 	if h.activeSession != nil {
-		h.hikClient.CloseAudioChannel(h.activeSession.ChannelID)
+		ctx := context.Background()
+		if err := h.sessionManager.ReleaseChannel(ctx, h.activeSession.ChannelID); err != nil {
+			logger.Log.Error("failed to release audio session",
+				slog.String("component", "webrtc"),
+				slog.String("channel_id", h.activeSession.ChannelID),
+				slog.String("error", err.Error()))
+		}
 		h.activeSession = nil
 	}
 
+	// Close peer connection
 	if h.peerConnection != nil {
 		h.peerConnection.Close()
 		h.peerConnection = nil

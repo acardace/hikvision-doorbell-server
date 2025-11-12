@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/acardace/hikvision-doorbell-server/internal/hikvision"
+	"github.com/acardace/hikvision-doorbell-server/internal/session"
+	"github.com/acardace/hikvision-doorbell-server/internal/streaming"
 	"github.com/gorilla/mux"
 )
 
@@ -14,9 +16,13 @@ type Handler struct {
 }
 
 func NewHandler(hikClient *hikvision.Client) *Handler {
+	// Create session manager and audio streamer
+	sessionManager := session.NewHikvisionSessionManager(hikClient)
+	audioStreamer := streaming.NewHikvisionAudioStreamer(hikClient)
+
 	return &Handler{
 		hikClient:     hikClient,
-		webrtcHandler: NewWebRTCHandler(hikClient),
+		webrtcHandler: NewWebRTCHandler(sessionManager, audioStreamer),
 	}
 }
 
