@@ -9,35 +9,104 @@ import (
 	"github.com/acardace/hikvision-doorbell-server/internal/session"
 )
 
+// OperationType represents the type of operation
+type OperationType int
+
+const (
+	OperationTypePlayFile OperationType = iota
+	OperationTypeWebRTC
+)
+
+// Operation represents a tracked operation
+type Operation struct {
+	Type   OperationType
+	Cancel context.CancelFunc
+}
+
+func (o *Operation) IsPlayFile() bool {
+	return o.Type == OperationTypePlayFile
+}
+
+func (o *Operation) IsWebRTC() bool {
+	return o.Type == OperationTypeWebRTC
+}
+
 // AbortManager manages ongoing operations that can be aborted
 type AbortManager struct {
 	mu             sync.Mutex
-	activeContexts map[string]context.CancelFunc
+	activeOps      []*Operation
 	sessionManager session.SessionManager
 }
 
 // NewAbortManager creates a new abort manager
 func NewAbortManager(sessionManager session.SessionManager) *AbortManager {
 	return &AbortManager{
-		activeContexts: make(map[string]context.CancelFunc),
+		activeOps:      make([]*Operation, 0),
 		sessionManager: sessionManager,
 	}
 }
 
 // Register registers a new operation with a cancel function
-func (am *AbortManager) Register(id string, cancel context.CancelFunc) {
+func (am *AbortManager) Register(opType OperationType, cancel context.CancelFunc) *Operation {
 	am.mu.Lock()
 	defer am.mu.Unlock()
-	am.activeContexts[id] = cancel
-	log.Printf("[AbortManager] Registered operation: %s", id)
+
+	op := &Operation{
+		Type:   opType,
+		Cancel: cancel,
+	}
+	am.activeOps = append(am.activeOps, op)
+	log.Printf("[AbortManager] Registered operation (type: %d)", opType)
+	return op
 }
 
 // Unregister removes an operation from tracking
-func (am *AbortManager) Unregister(id string) {
+func (am *AbortManager) Unregister(op *Operation) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
-	delete(am.activeContexts, id)
-	log.Printf("[AbortManager] Unregistered operation: %s", id)
+
+	for i, activeOp := range am.activeOps {
+		if activeOp == op {
+			am.activeOps = append(am.activeOps[:i], am.activeOps[i+1:]...)
+			log.Printf("[AbortManager] Unregistered operation (type: %d)", op.Type)
+			return
+		}
+	}
+}
+
+// AbortPlayFileOperations cancels only play-file operations (not WebRTC)
+func (am *AbortManager) AbortPlayFileOperations(ctx context.Context) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	playFileOps := 0
+	newActiveOps := make([]*Operation, 0)
+
+	for _, op := range am.activeOps {
+		if op.IsPlayFile() {
+			log.Printf("[AbortManager] Cancelling play-file operation")
+			op.Cancel()
+			playFileOps++
+		} else {
+			newActiveOps = append(newActiveOps, op)
+		}
+	}
+
+	am.activeOps = newActiveOps
+	log.Printf("[AbortManager] Aborted %d play-file operations", playFileOps)
+}
+
+// HasActiveWebRTC returns true if there's an active WebRTC session
+func (am *AbortManager) HasActiveWebRTC() bool {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	for _, op := range am.activeOps {
+		if op.IsWebRTC() {
+			return true
+		}
+	}
+	return false
 }
 
 // AbortAll cancels all active operations and closes all audio channels
@@ -45,16 +114,16 @@ func (am *AbortManager) AbortAll(ctx context.Context) error {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
-	log.Printf("[AbortManager] Aborting %d active operations", len(am.activeContexts))
+	log.Printf("[AbortManager] Aborting %d active operations", len(am.activeOps))
 
 	// Cancel all active operations
-	for id, cancel := range am.activeContexts {
-		log.Printf("[AbortManager] Cancelling operation: %s", id)
-		cancel()
+	for _, op := range am.activeOps {
+		log.Printf("[AbortManager] Cancelling operation (type: %d)", op.Type)
+		op.Cancel()
 	}
 
-	// Clear the map
-	am.activeContexts = make(map[string]context.CancelFunc)
+	// Clear the slice
+	am.activeOps = make([]*Operation, 0)
 
 	// List all channels and close any that are enabled (in use)
 	channels, err := am.sessionManager.ListChannels(ctx)

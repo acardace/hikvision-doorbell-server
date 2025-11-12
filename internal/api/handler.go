@@ -20,11 +20,12 @@ func NewHandler(hikClient *hikvision.Client) *Handler {
 	// Create session manager and audio streamer
 	sessionManager := session.NewHikvisionSessionManager(hikClient)
 	audioStreamer := streaming.NewHikvisionAudioStreamer(hikClient)
+	abortManager := NewAbortManager(sessionManager)
 
 	return &Handler{
 		hikClient:     hikClient,
-		webrtcHandler: NewWebRTCHandler(sessionManager, audioStreamer),
-		abortManager:  NewAbortManager(sessionManager),
+		webrtcHandler: NewWebRTCHandler(sessionManager, audioStreamer, abortManager),
+		abortManager:  abortManager,
 	}
 }
 

@@ -10,25 +10,28 @@ import (
 
 	"github.com/acardace/hikvision-doorbell-server/internal/hikvision"
 	"github.com/acardace/hikvision-doorbell-server/internal/session"
-	"github.com/google/uuid"
 )
 
 // HandlePlayFile handles uploading and playing an audio file
 // This automatically manages the session lifecycle
 func HandlePlayFile(hikClient *hikvision.Client, abortManager *AbortManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Check if there's an active WebRTC session
+		if abortManager.HasActiveWebRTC() {
+			log.Println("[PlayFile] Rejected: WebRTC session is active")
+			http.Error(w, "Cannot play file while WebRTC session is active", http.StatusConflict)
+			return
+		}
+
 		// Create a cancellable context for this operation
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		// Generate unique ID for this operation
-		operationID := fmt.Sprintf("playfile-%s", uuid.New().String())
-
 		// Register with abort manager
-		abortManager.Register(operationID, cancel)
-		defer abortManager.Unregister(operationID)
+		op := abortManager.Register(OperationTypePlayFile, cancel)
+		defer abortManager.Unregister(op)
 
-		log.Printf("[PlayFile] Received request to play audio file (operation: %s)", operationID)
+		log.Println("[PlayFile] Received request to play audio file")
 
 		// Read uploaded file
 		err := r.ParseMultipartForm(10 << 20) // 10 MB max

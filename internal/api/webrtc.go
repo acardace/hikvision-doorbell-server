@@ -18,13 +18,15 @@ type WebRTCHandler struct {
 	config         *WebRTCConfig
 	sessionManager session.SessionManager
 	audioStreamer  streaming.AudioStreamer
+	abortManager   *AbortManager
 	peerConnection *webrtc.PeerConnection
 	activeSession  *session.AudioSession
+	activeOp       *Operation // Track active WebRTC operation
 	mu             sync.Mutex
 	cancelFunc     context.CancelFunc // Cancel function for goroutines
 }
 
-func NewWebRTCHandler(sessionManager session.SessionManager, audioStreamer streaming.AudioStreamer) *WebRTCHandler {
+func NewWebRTCHandler(sessionManager session.SessionManager, audioStreamer streaming.AudioStreamer, abortManager *AbortManager) *WebRTCHandler {
 	config := NewWebRTCConfig()
 	config.LoadFromEnv()
 
@@ -32,6 +34,7 @@ func NewWebRTCHandler(sessionManager session.SessionManager, audioStreamer strea
 		config:         config,
 		sessionManager: sessionManager,
 		audioStreamer:  audioStreamer,
+		abortManager:   abortManager,
 	}
 }
 
@@ -40,10 +43,20 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Check if there's already an active WebRTC session
+	if h.abortManager.HasActiveWebRTC() {
+		logger.Log.Warn("rejected WebRTC offer: session already active", slog.String("component", "webrtc"))
+		http.Error(w, "WebRTC session already active", http.StatusConflict)
+		return
+	}
+
 	// Create context for managing goroutines lifecycle
 	// Use Background() instead of r.Context() so streaming continues after HTTP handler returns
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancelFunc = cancel
+
+	// Register WebRTC operation with abort manager
+	h.activeOp = h.abortManager.Register(OperationTypeWebRTC, cancel)
 
 	// Parse SDP offer
 	var offer webrtc.SessionDescription
@@ -102,6 +115,11 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		// Start session if not already active
 		if h.activeSession == nil {
 			logger.Log.Info("acquiring audio session", slog.String("component", "webrtc"))
+
+			// Abort any ongoing play-file operations to free up the channel
+			// WebRTC connections take precedence
+			logger.Log.Info("aborting any active play-file operations", slog.String("component", "webrtc"))
+			h.abortManager.AbortPlayFileOperations(ctx)
 
 			// Acquire session using session manager
 			sess, err := h.sessionManager.AcquireChannel(ctx)
@@ -252,6 +270,12 @@ func (h *WebRTCHandler) cleanup() {
 	if h.peerConnection != nil {
 		h.peerConnection.Close()
 		h.peerConnection = nil
+	}
+
+	// Unregister from abort manager (last step after all cleanup)
+	if h.activeOp != nil {
+		h.abortManager.Unregister(h.activeOp)
+		h.activeOp = nil
 	}
 }
 
