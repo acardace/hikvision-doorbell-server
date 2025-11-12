@@ -13,6 +13,7 @@ import (
 type Handler struct {
 	hikClient     *hikvision.Client
 	webrtcHandler *WebRTCHandler
+	abortManager  *AbortManager
 }
 
 func NewHandler(hikClient *hikvision.Client) *Handler {
@@ -23,6 +24,7 @@ func NewHandler(hikClient *hikvision.Client) *Handler {
 	return &Handler{
 		hikClient:     hikClient,
 		webrtcHandler: NewWebRTCHandler(sessionManager, audioStreamer),
+		abortManager:  NewAbortManager(sessionManager),
 	}
 }
 
@@ -83,7 +85,10 @@ func (h *Handler) SetupRoutes() *mux.Router {
 	router.HandleFunc("/api/webrtc/offer", h.webrtcHandler.HandleOffer).Methods("POST", "OPTIONS")
 
 	// Play audio file (with automatic session management)
-	router.HandleFunc("/api/audio/play-file", HandlePlayFile(h.hikClient)).Methods("POST", "OPTIONS")
+	router.HandleFunc("/api/audio/play-file", HandlePlayFile(h.hikClient, h.abortManager)).Methods("POST", "OPTIONS")
+
+	// Abort all operations
+	router.HandleFunc("/api/abort", h.HandleAbort).Methods("POST", "OPTIONS")
 
 	return router
 }

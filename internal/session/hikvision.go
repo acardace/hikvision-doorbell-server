@@ -91,3 +91,24 @@ func (m *HikvisionSessionManager) ReleaseChannel(ctx context.Context, channelID 
 
 	return nil
 }
+
+// ListChannels returns all available channels and their status
+func (m *HikvisionSessionManager) ListChannels(ctx context.Context) ([]ChannelInfo, error) {
+	channels, err := m.client.GetTwoWayAudioChannels()
+	if err != nil {
+		logger.Log.Error("failed to get audio channels",
+			slog.String("component", "session_manager"),
+			slog.String("error", err.Error()))
+		return nil, err
+	}
+
+	result := make([]ChannelInfo, 0, len(channels.Channels))
+	for _, ch := range channels.Channels {
+		result = append(result, ChannelInfo{
+			ID:      ch.ID,
+			Enabled: ch.Enabled == "true",
+		})
+	}
+
+	return result, nil
+}

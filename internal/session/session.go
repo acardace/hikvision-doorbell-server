@@ -16,6 +16,12 @@ type AudioSession struct {
 	SessionID string
 }
 
+// ChannelInfo represents information about an audio channel
+type ChannelInfo struct {
+	ID      string
+	Enabled bool // true if channel is currently in use
+}
+
 // SessionManager manages audio sessions with devices
 // This interface allows for different backend implementations (Hikvision, Dahua, etc.)
 type SessionManager interface {
@@ -24,4 +30,7 @@ type SessionManager interface {
 
 	// ReleaseChannel closes an audio channel by its ID
 	ReleaseChannel(ctx context.Context, channelID string) error
+
+	// ListChannels returns all available channels and their status
+	ListChannels(ctx context.Context) ([]ChannelInfo, error)
 }
