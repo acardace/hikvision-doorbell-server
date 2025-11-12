@@ -116,16 +116,6 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add transceiver for receiving audio from client
-	_, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionRecvonly,
-	})
-	if err != nil {
-		log.Printf("[WebRTC] Failed to add transceiver: %v", err)
-		http.Error(w, "Failed to add transceiver", http.StatusInternalServerError)
-		return
-	}
-
 	// Handle incoming audio track (from browser/client to doorbell)
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("[WebRTC] Received track: %s, codec: %s", track.Kind(), track.Codec().MimeType)
@@ -178,26 +168,28 @@ func (h *WebRTCHandler) HandleOffer(w http.ResponseWriter, r *http.Request) {
 			// Start goroutine to read from doorbell and send via WebRTC
 			go func() {
 				defer log.Println("[WebRTC] Stopped reading from doorbell")
-				buffer := make([]byte, 160) // 20ms of G.711 audio
+				const sampleSize = 160 // 20ms of G.711 audio at 8000Hz
+
+				// Use io.ReadFull to read exactly 160 bytes at a time
+				buffer := make([]byte, sampleSize)
 
 				for {
-					n, err := h.audioReader.Read(buffer)
+					// Read exactly sampleSize bytes
+					n, err := io.ReadFull(h.audioReader, buffer)
 					if err != nil {
-						if err != io.EOF {
+						if err != io.EOF && err != io.ErrUnexpectedEOF {
 							log.Printf("[WebRTC] Error reading from doorbell: %v", err)
 						}
 						return
 					}
 
-					if n > 0 {
-						// Send to WebRTC track
-						if err := audioTrack.WriteSample(media.Sample{
-							Data:     buffer[:n],
-							Duration: time.Millisecond * 20,
-						}); err != nil {
-							log.Printf("[WebRTC] Error sending sample: %v", err)
-							return
-						}
+					// Send to WebRTC track with precise timing
+					if err := audioTrack.WriteSample(media.Sample{
+						Data:     buffer[:n],
+						Duration: time.Millisecond * 20,
+					}); err != nil {
+						log.Printf("[WebRTC] Error sending sample: %v", err)
+						return
 					}
 				}
 			}()

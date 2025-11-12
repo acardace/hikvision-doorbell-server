@@ -10,13 +10,15 @@ import (
 
 // AudioStreamReader continuously reads audio data from the device
 type AudioStreamReader struct {
-	client    *Client
-	session   *AudioSession
-	url       string
-	stopChan  chan struct{}
-	dataChan  chan []byte
-	errChan   chan error
-	closeOnce sync.Once
+	client      *Client
+	session     *AudioSession
+	url         string
+	stopChan    chan struct{}
+	dataChan    chan []byte
+	errChan     chan error
+	closeOnce   sync.Once
+	buffer      []byte // Buffer for partial reads
+	bufferMutex sync.Mutex
 }
 
 // NewAudioStreamReader creates a new continuous audio stream reader
@@ -114,11 +116,26 @@ func (a *AudioStreamReader) streamLoop() {
 	}
 }
 
-// Read implements io.Reader interface
+// Read implements io.Reader interface with buffering for io.ReadFull support
 func (a *AudioStreamReader) Read(p []byte) (int, error) {
+	a.bufferMutex.Lock()
+	defer a.bufferMutex.Unlock()
+
+	// First, use any buffered data
+	if len(a.buffer) > 0 {
+		n := copy(p, a.buffer)
+		a.buffer = a.buffer[n:]
+		return n, nil
+	}
+
+	// No buffered data, get new data from channel
 	select {
 	case data := <-a.dataChan:
 		n := copy(p, data)
+		// If data is larger than p, buffer the remainder
+		if n < len(data) {
+			a.buffer = data[n:]
+		}
 		return n, nil
 	case err := <-a.errChan:
 		return 0, err
